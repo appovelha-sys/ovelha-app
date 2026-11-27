@@ -14,6 +14,17 @@ function AdminLogin() {
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  async function handleReset() {
+    if (!email) { setError("Digite seu e-mail primeiro."); return; }
+    setLoading(true);
+    await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/admin`,
+    });
+    setResetSent(true);
+    setLoading(false);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -77,8 +88,13 @@ function AdminLogin() {
             </div>
           </div>
           {error && <p className="admin-error">{error}</p>}
+          {resetSent && <p style={{ color: "#16a34a", fontSize: 13, textAlign: "center" }}>✓ Email de redefinição enviado! Verifique sua caixa de entrada.</p>}
           <button className="admin-btn-primary" type="submit" disabled={loading}>
             {loading ? "Verificando..." : "Entrar"}
+          </button>
+          <button type="button" onClick={handleReset} disabled={loading}
+            style={{ background: "none", border: "none", color: "var(--admin-muted)", fontSize: 13, cursor: "pointer", textDecoration: "underline", marginTop: 8 }}>
+            Esqueci minha senha
           </button>
         </form>
 
