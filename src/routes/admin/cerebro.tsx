@@ -1223,7 +1223,61 @@ function MarkdownDocEditor({ pillarId, title, description }: { pillarId: string;
 function CerebroPage() {
   const [activePillar, setActivePillar] = useState<string>("identidade");
   const [publishLoading, setPublishLoading] = useState(false);
+  const [migrating, setMigrating] = useState(false);
   const [version] = useState("0.1-rascunho");
+
+  async function migrarLocalStorage() {
+    const lsEntries = (() => {
+      try { return JSON.parse(localStorage.getItem("ovelha_fundamentos_entries") || "[]"); } catch { return []; }
+    })();
+    const lsSubjects = (() => {
+      try { return JSON.parse(localStorage.getItem("ovelha_fundamentos_subjects") || "[]"); } catch { return []; }
+    })();
+    const PILLAR_IDS = ["identidade", "personalidade", "comunicacao", "fundamentos"];
+    const pillarRows: { id: string; draft: string; published: string | null; published_at: string | null }[] = [];
+    for (const id of PILLAR_IDS) {
+      const draft = localStorage.getItem(`ovelha_pillar_${id}_draft`);
+      const published = localStorage.getItem(`ovelha_pillar_${id}_published`);
+      const published_at = localStorage.getItem(`ovelha_pillar_${id}_publishedAt`);
+      if (draft || published) pillarRows.push({ id, draft: draft || "", published: published || null, published_at: published_at || null });
+    }
+
+    const total = lsEntries.length + lsSubjects.length + pillarRows.length;
+    if (total === 0) { alert("Nenhum dado local encontrado neste browser."); return; }
+
+    if (!confirm(`Encontrei:\n• ${lsEntries.length} versículos\n• ${lsSubjects.length} assuntos\n• ${pillarRows.length} pilares\n\nEnviar tudo para o Supabase?`)) return;
+
+    setMigrating(true);
+    let erros = 0;
+
+    // Versículos em lotes de 50
+    for (let i = 0; i < lsEntries.length; i += 50) {
+      const { error } = await supabase.from("brain_entries").upsert(lsEntries.slice(i, i + 50), { onConflict: "id" });
+      if (error) erros++;
+    }
+
+    // Assuntos
+    if (lsSubjects.length > 0) {
+      const rows = lsSubjects.map((s: { id: string; label: string; tags: string[]; synonyms: string[]; relatedIds: string[] }) => ({
+        id: s.id, label: s.label, tags: s.tags || [], synonyms: s.synonyms || [], related_ids: s.relatedIds || [],
+      }));
+      const { error } = await supabase.from("brain_subjects").upsert(rows, { onConflict: "id" });
+      if (error) erros++;
+    }
+
+    // Pilares
+    for (const p of pillarRows) {
+      const { error } = await supabase.from("brain_pillars").upsert(p, { onConflict: "id" });
+      if (error) erros++;
+    }
+
+    setMigrating(false);
+    if (erros === 0) {
+      alert(`✅ Migração concluída!\n${lsEntries.length} versículos, ${lsSubjects.length} assuntos e ${pillarRows.length} pilares enviados.\n\nRecarregue a página para ver os dados.`);
+    } else {
+      alert(`⚠️ Migração com ${erros} erro(s). Verifique se está logado como admin.`);
+    }
+  }
 
   async function publishAll() {
     setPublishLoading(true);
@@ -1253,6 +1307,10 @@ function CerebroPage() {
             <p className="admin-page-sub">Brain Engine · Versão <strong>{version}</strong></p>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
+            <button className="admin-btn-ghost" onClick={migrarLocalStorage} disabled={migrating}
+              title="Migra dados salvos localmente no browser para o Supabase">
+              {migrating ? "Migrando…" : "↑ Migrar dados locais"}
+            </button>
             <button className="admin-btn-ghost"><Clock size={15} /> Histórico</button>
             <button className="admin-btn-primary" onClick={publishAll} disabled={publishLoading}>
               <Send size={15} /> {publishLoading ? "Compilando…" : "Publicar versão"}
