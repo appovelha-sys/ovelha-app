@@ -1,10 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Plus, ChevronRight, Trash2, Eye, EyeOff,
   Save, Send, Clock, BookOpen, Upload, Search, Zap,
 } from "lucide-react";
 import { AdminShell } from "@/components/admin/AdminShell";
+import { supabase } from "@/lib/supabase";
 
 export const Route = createFileRoute("/admin/cerebro")({ component: CerebroPage });
 
@@ -560,28 +561,10 @@ function VerseCard({ entry, onToggle, onTogglePrioridade, onRemove }: {
   );
 }
 
-const LS_ENTRIES  = "ovelha_fundamentos_entries";
-const LS_SUBJECTS = "ovelha_fundamentos_subjects";
-
-function loadEntries(): BibleEntry[] {
-  try {
-    const raw = localStorage.getItem(LS_ENTRIES);
-    if (raw) return JSON.parse(raw) as BibleEntry[];
-  } catch { /* ignore */ }
-  return INITIAL_VERSES;
-}
-
-function loadSubjects(entries: BibleEntry[]): Subject[] {
-  try {
-    const raw = localStorage.getItem(LS_SUBJECTS);
-    if (raw) return JSON.parse(raw) as Subject[];
-  } catch { /* ignore */ }
-  return extractSubjectsFromVerses(entries);
-}
-
 function FundamentosModule() {
   // --- Verse state ---
-  const [entries, setEntries] = useState<BibleEntry[]>(loadEntries);
+  const [entries, setEntries] = useState<BibleEntry[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Omit<BibleEntry, "id" | "active">>(EMPTY_FORM);
   const [showBulk, setShowBulk] = useState(false);
@@ -594,7 +577,7 @@ function FundamentosModule() {
   const [filterPrioridade, setFilterPrioridade] = useState<"todas" | "essencial" | "contextual">("todas");
 
   // --- Subject state ---
-  const [subjects, setSubjects] = useState<Subject[]>(() => loadSubjects(loadEntries()));
+  const [subjects, setSubjects] = useState<Subject[]>([]);
   const [selectedSubject, setSelectedSubject] = useState<Subject | null>(null);
   const [subjectSearch, setSubjectSearch] = useState("");
   const [subjectSort, setSubjectSort] = useState<"alpha" | "count">("alpha");
@@ -604,13 +587,40 @@ function FundamentosModule() {
   const [newSubjectLabel, setNewSubjectLabel] = useState("");
   const [newSubjectSynonyms, setNewSubjectSynonyms] = useState("");
 
-  // Persiste automaticamente ao localStorage a cada mudança
-  useEffect(() => {
-    try { localStorage.setItem(LS_ENTRIES, JSON.stringify(entries)); } catch { /* ignore */ }
-  }, [entries]);
+  // Debounce ref para sync de assuntos
+  const subjectSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Carrega dados do Supabase na entrada
   useEffect(() => {
-    try { localStorage.setItem(LS_SUBJECTS, JSON.stringify(subjects)); } catch { /* ignore */ }
+    (async () => {
+      setLoading(true);
+      const [{ data: dbEntries }, { data: dbSubjects }] = await Promise.all([
+        supabase.from("brain_entries").select("*").order("updated_at", { ascending: true }),
+        supabase.from("brain_subjects").select("*").order("label", { ascending: true }),
+      ]);
+      const loadedEntries = (dbEntries as BibleEntry[] ?? []);
+      setEntries(loadedEntries.length > 0 ? loadedEntries : INITIAL_VERSES);
+      setSubjects((dbSubjects as Subject[] ?? []).map(s => ({
+        ...s,
+        tags: (s.tags as unknown as string[]) ?? [],
+        synonyms: (s.synonyms as unknown as string[]) ?? [],
+        relatedIds: (s.relatedIds as unknown as string[]) ?? [],
+      })));
+      setLoading(false);
+    })();
+  }, []);
+
+  // Sync assuntos para o Supabase com debounce (0.8s após última mudança)
+  useEffect(() => {
+    if (loading || subjects.length === 0) return;
+    if (subjectSyncTimer.current) clearTimeout(subjectSyncTimer.current);
+    subjectSyncTimer.current = setTimeout(async () => {
+      await supabase.from("brain_subjects").upsert(
+        subjects.map(s => ({ id: s.id, label: s.label, tags: s.tags, synonyms: s.synonyms, related_ids: s.relatedIds })),
+        { onConflict: "id" }
+      );
+    }, 800);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subjects]);
 
   const essential = entries.filter(e => e.prioridade === "essencial" && e.active);
@@ -622,10 +632,13 @@ function FundamentosModule() {
     return `b${nums.length > 0 ? Math.max(...nums) + 1 : 1}`;
   }
 
-  function add() {
+  async function add() {
     if (!form.ref.trim() || !form.text.trim()) return;
-    setEntries(e => [...e, { ...form, id: nextId(), active: true }]);
+    const id = nextId();
+    const newEntry: BibleEntry = { ...form, id, active: true };
+    setEntries(e => [...e, newEntry]);
     setForm(EMPTY_FORM); setShowForm(false);
+    await supabase.from("brain_entries").upsert(newEntry, { onConflict: "id" });
   }
 
   function analyzeBulk() { setBulkPreview(parseBulkVerses(bulkRaw, entries)); }
@@ -654,10 +667,11 @@ function FundamentosModule() {
     if (selectedSubject?.id === editingSubject.id) setSelectedSubject(editingSubject);
     setEditingSubject(null);
   }
-  function deleteSubject(id: string) {
+  async function deleteSubject(id: string) {
     if (!confirm("Remover assunto? Os versículos não serão alterados.")) return;
     setSubjects(ss => ss.filter(s => s.id !== id));
     if (selectedSubject?.id === id) setSelectedSubject(null);
+    await supabase.from("brain_subjects").delete().eq("id", id);
   }
   function mergeInto() {
     if (!selectedSubject || !mergingWith) return;
@@ -671,18 +685,32 @@ function FundamentosModule() {
     setSubjects(ss => ss.map(s => s.id === target.id ? merged : s).filter(s => s.id !== selectedSubject.id));
     setSelectedSubject(null); setMergingWith(""); setEditingSubject(null);
   }
-  function confirmBulk() {
+  async function confirmBulk() {
     if (!bulkPreview.length) return;
     setEntries(e => [...e, ...bulkPreview]);
     setBulkRaw(""); setBulkPreview([]); setShowBulk(false);
+    await supabase.from("brain_entries").upsert(bulkPreview, { onConflict: "id" });
   }
 
-  function toggle(id: string) { setEntries(e => e.map(x => x.id === id ? { ...x, active: !x.active } : x)); }
-  function togglePrioridade(id: string) {
-    setEntries(e => e.map(x => x.id === id
-      ? { ...x, prioridade: x.prioridade === "essencial" ? "contextual" : "essencial" } : x));
+  async function toggle(id: string) {
+    const entry = entries.find(x => x.id === id);
+    if (!entry) return;
+    const newActive = !entry.active;
+    setEntries(e => e.map(x => x.id === id ? { ...x, active: newActive } : x));
+    await supabase.from("brain_entries").update({ active: newActive }).eq("id", id);
   }
-  function remove(id: string) { if (!confirm("Remover versículo?")) return; setEntries(e => e.filter(x => x.id !== id)); }
+  async function togglePrioridade(id: string) {
+    const entry = entries.find(x => x.id === id);
+    if (!entry) return;
+    const newPrio = entry.prioridade === "essencial" ? "contextual" : "essencial";
+    setEntries(e => e.map(x => x.id === id ? { ...x, prioridade: newPrio } : x));
+    await supabase.from("brain_entries").update({ prioridade: newPrio }).eq("id", id);
+  }
+  async function remove(id: string) {
+    if (!confirm("Remover versículo?")) return;
+    setEntries(e => e.filter(x => x.id !== id));
+    await supabase.from("brain_entries").delete().eq("id", id);
+  }
 
   const filteredSubjects = subjects
     .filter(s => !subjectSearch || s.label.toLowerCase().includes(subjectSearch.toLowerCase())
@@ -711,6 +739,12 @@ function FundamentosModule() {
     background: active ? "var(--admin-accent)" : "none",
     color: active ? "#fff" : "var(--admin-muted)",
   });
+
+  if (loading) return (
+    <div className="cerebro-module" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 200 }}>
+      <span style={{ color: "var(--admin-muted)", fontSize: 14 }}>Carregando dados...</span>
+    </div>
+  );
 
   return (
     <div className="cerebro-module">
@@ -1097,19 +1131,25 @@ Em suas próprias palavras: "Sou o Ovelha..."`,
 
 function MarkdownDocEditor({ pillarId, title, description }: { pillarId: string; title: string; description: string }) {
   const placeholder = PILLAR_PLACEHOLDERS[pillarId] ?? `# ${title}\n\nDescreva este pilar em Markdown...`;
-  const lsDraft     = `ovelha_pillar_${pillarId}_draft`;
-  const lsPublished = `ovelha_pillar_${pillarId}_published`;
-  const lsPublishedAt = `ovelha_pillar_${pillarId}_publishedAt`;
 
-  const [draft, setDraft] = useState(() => {
-    try { return localStorage.getItem(lsDraft) ?? ""; } catch { return ""; }
-  });
-  const [published, setPublished] = useState<string | null>(() => {
-    try { return localStorage.getItem(lsPublished); } catch { return null; }
-  });
-  const [publishedAt, setPublishedAt] = useState<string | null>(() => {
-    try { return localStorage.getItem(lsPublishedAt); } catch { return null; }
-  });
+  const [draft, setDraft] = useState("");
+  const [published, setPublished] = useState<string | null>(null);
+  const [publishedAt, setPublishedAt] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    setLoaded(false);
+    supabase.from("brain_pillars").select("draft,published,published_at").eq("id", pillarId).maybeSingle()
+      .then(({ data }) => {
+        if (data) {
+          setDraft(data.draft ?? "");
+          setPublished(data.published ?? null);
+          setPublishedAt(data.published_at ?? null);
+        }
+        setLoaded(true);
+      });
+  }, [pillarId]);
 
   const tokens = estimateTokens(draft);
   const publishedTokens = estimateTokens(published ?? "");
@@ -1117,19 +1157,28 @@ function MarkdownDocEditor({ pillarId, title, description }: { pillarId: string;
 
   function handleDraftChange(value: string) {
     setDraft(value);
-    try { localStorage.setItem(lsDraft, value); } catch { /* ignore */ }
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      supabase.from("brain_pillars").upsert({ id: pillarId, draft: value }, { onConflict: "id" });
+    }, 1000);
   }
 
-  function publish() {
+  async function publish() {
     if (!draft.trim()) return;
     const now = new Date().toISOString();
     setPublished(draft);
     setPublishedAt(now);
-    try {
-      localStorage.setItem(lsPublished, draft);
-      localStorage.setItem(lsPublishedAt, now);
-    } catch { /* ignore */ }
+    await supabase.from("brain_pillars").upsert(
+      { id: pillarId, draft, published: draft, published_at: now },
+      { onConflict: "id" }
+    );
   }
+
+  if (!loaded) return (
+    <div className="cerebro-module" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 200 }}>
+      <span style={{ color: "var(--admin-muted)", fontSize: 14 }}>Carregando...</span>
+    </div>
+  );
 
   return (
     <div className="cerebro-module">
@@ -1178,9 +1227,19 @@ function CerebroPage() {
 
   async function publishAll() {
     setPublishLoading(true);
-    await new Promise(r => setTimeout(r, 1200));
-    alert("Publicação simulada. Conecte o banco de dados para publicação real.");
+    const now = new Date().toISOString();
+    const pillars = ["identidade", "personalidade", "comunicacao"];
+    for (const id of pillars) {
+      const { data } = await supabase.from("brain_pillars").select("draft").eq("id", id).maybeSingle();
+      if (data?.draft?.trim()) {
+        await supabase.from("brain_pillars").upsert(
+          { id, published: data.draft, published_at: now },
+          { onConflict: "id" }
+        );
+      }
+    }
     setPublishLoading(false);
+    alert("Versão publicada! Todos os pilares com rascunho foram compilados.");
   }
 
   const pillar = PILLARS.find(p => p.id === activePillar)!;
