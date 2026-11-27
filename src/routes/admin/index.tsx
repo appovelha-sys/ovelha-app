@@ -1,8 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Lock, Eye, EyeOff } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 export const Route = createFileRoute("/admin/")({ component: AdminLogin });
+
+const ADMIN_EMAIL = "sarahstefhani1999@gmail.com";
 
 function AdminLogin() {
   const navigate = useNavigate();
@@ -16,14 +19,20 @@ function AdminLogin() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    await new Promise(r => setTimeout(r, 800));
-    // TODO: substituir por autenticação real via Supabase Auth com role admin
-    if (email === "admin@ovelha.app" && pass === "admin123") {
-      sessionStorage.setItem("admin_auth", "true");
-      navigate({ to: "/admin/dashboard" });
-    } else {
-      setError("Credenciais inválidas.");
+    const { data, error: err } = await supabase.auth.signInWithPassword({ email, password: pass });
+    if (err || !data.user) {
+      setError("E-mail ou senha incorretos.");
+      setLoading(false);
+      return;
     }
+    if (data.user.email !== ADMIN_EMAIL) {
+      await supabase.auth.signOut();
+      setError("Acesso restrito ao administrador.");
+      setLoading(false);
+      return;
+    }
+    sessionStorage.setItem("admin_auth", "true");
+    navigate({ to: "/admin/dashboard" });
     setLoading(false);
   }
 
@@ -45,7 +54,7 @@ function AdminLogin() {
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
-              placeholder="admin@ovelha.app"
+              placeholder="seu@email.com"
               required
               autoComplete="email"
             />
@@ -73,9 +82,6 @@ function AdminLogin() {
           </button>
         </form>
 
-        <p className="admin-login-note">
-          ⚠️ Credenciais de acesso provisórias. Configurar autenticação real via Supabase Auth.
-        </p>
       </div>
     </div>
   );
