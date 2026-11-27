@@ -41,41 +41,41 @@ const BRAIN_STATUS: BrainStatus[] = [
   { pillar: "comunicacao",   label: "Comunicação",   icon: "💬", status: "vazio" },
 ];
 
-/** Simula chamada à IA que retorna estrutura com múltiplos blocos. */
-async function simulateAiCall(userText: string, model: string): Promise<AiResponse> {
-  // Simula latência de rede para primeira resposta
-  await new Promise(r => setTimeout(r, Math.floor(Math.random() * 800 + 400)));
+/** Chama a IA real via Pages Function. */
+async function callAiReal(userText: string, history: Msg[]): Promise<AiResponse> {
+  const t0 = Date.now();
 
-  const totalTokens = Math.floor(Math.random() * 300 + 50);
-  const latencyMs = Math.floor(Math.random() * 1500 + 300);
+  const aiHistory = history.slice(-10).map(m => ({
+    role: m.role === "ai" ? "assistant" : "user",
+    content: m.text,
+  }));
 
-  // Determina número de blocos (1–3) baseado no conteúdo simulado
-  const roll = Math.random();
-  const isUrgent = /ajuda|emergência|perigo|socorro/i.test(userText);
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: userText, history: aiHistory, test_mode: true }),
+  });
 
-  let blocks: { text: string; urgent?: boolean }[];
+  const latencyMs = Date.now() - t0;
 
-  if (isUrgent) {
-    blocks = [{ text: "Estou aqui com você agora.", urgent: true }];
-  } else if (roll < 0.4) {
-    // Resposta única
-    blocks = [{ text: `[Simulação — ${model}] Uma resposta completa e direta à sua mensagem. Conecte a integração real para respostas reais.` }];
-  } else if (roll < 0.75) {
-    // Dois blocos
-    blocks = [
-      { text: `Boa pergunta! 😊 Deixa eu pensar aqui...` },
-      { text: `[Simulação — ${model}] Essa é a resposta completa. No OVELHA real, cada bloco seria gerado pelo cérebro publicado com base nos fundamentos e personalidade configurados.` },
-    ];
-  } else {
-    // Três blocos
-    blocks = [
-      { text: `Hmm, interessante isso que você trouxe! 🤔` },
-      { text: `[Simulação — ${model}] Segundo bloco — desenvolvendo a ideia com mais profundidade.` },
-      { text: `Faz sentido? Me fala o que você achou 🙏` },
-    ];
+  if (!res.ok) {
+    return {
+      blocks: [{ text: `Erro ao chamar a IA (${res.status}). Verifique o binding AI no Cloudflare.` }],
+      totalTokens: 0,
+      latencyMs,
+    };
   }
 
-  return { blocks, totalTokens, latencyMs };
+  const json = await res.json();
+  const text: string = json.response ?? "Sem resposta";
+
+  const isUrgent = /ajuda|emergência|perigo|socorro/i.test(text);
+
+  return {
+    blocks: [{ text, urgent: isUrgent }],
+    totalTokens: Math.ceil(text.length / 4),
+    latencyMs,
+  };
 }
 
 function LaboratorioPage() {
@@ -118,7 +118,7 @@ function LaboratorioPage() {
     let response: AiResponse;
     try {
       // Uma única chamada à IA que retorna todos os blocos
-      response = await simulateAiCall(userMsg.text, model);
+      response = await callAiReal(userMsg.text, msgs);
     } catch {
       if (seqRef.current !== seqId) return;
       setIsTyping(false);
